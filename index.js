@@ -1,158 +1,151 @@
-// server/index.js  (copy–paste whole file)
+// KidVid server — Render-ready
+// Exposes: /health, /api/health, /api/videos/:range (1-2, 3-5, 6-8)
 
-import express from 'express';
-import fetch from 'node-fetch';
-import cors from 'cors';
-import fs from 'fs';
-import path from 'path';
-import dotenv from 'dotenv';
-import cron from 'node-cron';
-
-dotenv.config({ path: '.env' }); // loads YOUTUBE_API_KEYS
+const express = require('express');
+const cors = require('cors');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = 4000;
-// make the cache folder path explicit (no __dirname needed)
-const CACHE_DIR = path.resolve('./cache');
+// --- Port for Render/Node
+const PORT = process.env.PORT || 4000;
 
-// -------- Age-specific search queries --------
+// --- Load YouTube API keys from env (comma-separated)
+const KEY_POOL = (process.env.YOUTUBE_API_KEYS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+let keyIndex = 0;
+function nextKey() {
+  if (!KEY_POOL.length) return '';
+  const k = KEY_POOL[keyIndex % KEY_POOL.length];
+  keyIndex++;
+  return k;
+}
+
+// ---- Simple in-memory cache
+// cache[range] = { ts, items }
+const cache = Object.create(null);
+const CACHE_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+// ---- Queries per age range (kid-safe themes)
 const RANGE_QUERIES = {
   '1-2': [
-    'toddler nursery rhymes',
-    'baby sensory videos',
-    'cocomelon songs',
-    'peekaboo songs for babies',
-    'bedtime lullabies for toddlers',
-    'abc song toddler',
-    'learn colors for babies',
-    'animal sounds for toddlers'
+    'Cocomelon nursery rhymes',
+    'BabyBus songs',
+    'Super Simple Songs kids',
+    'Little Baby Bum',
+    'Baby Einstein',
+    'Pinkfong Baby Shark',
+    'Hey Bear Sensory'
   ],
   '3-5': [
-    'preschool phonics',
-    'learn numbers 1-20 preschool',
-    'learn shapes and colors preschool',
-    'blippi educational for kids',
-    'peppa pig educational',
-    'alphabet sounds kindergarten',
-    'sight words for kids',
-    'story time for kids read aloud'
+    'Peppa Pig full episodes',
+    'Bluey official channel episodes',
+    'Paw Patrol compilation',
+    'Numberblocks episodes',
+    'Blippi educational videos',
+    'Octonauts full episodes',
+    'Masha and the Bear'
   ],
   '6-8': [
-    'kids science experiments',
-    'math grade 2',
-    'reading comprehension kids',
-    'national geographic kids animals',
-    'geography for kids',
-    'minecraft education for kids',
-    'history for kids',
-    'space facts for kids'
-  ]
+    'Sonic Boom cartoon',
+    'Teen Titans Go full episodes',
+    'LEGO Ninjago episodes',
+    'Pokemon kids cartoon episodes',
+    'The Amazing World of Gumball',
+    'Wild Kratts full episodes',
+    'Phineas and Ferb'
+  ],
 };
 
-// -------- Keys --------
-const RAW_KEYS = process.env.YOUTUBE_API_KEYS || '';
-const API_KEYS = RAW_KEYS.split(',').map(k => k.trim()).filter(Boolean);
+// ---- YouTube search helper (uses global fetch on Node 18+)
+async function ytSearch(query, maxResults = 25) {
+  const key = nextKey();
+  if (!key) return [];
 
-console.log(`🔑 Keys loaded: ${API_KEYS.length}`);
+  const url = new URL('https://www.googleapis.com/youtube/v3/search');
+  url.searchParams.set('part', 'snippet');
+  url.searchParams.set('type', 'video');
+  url.searchParams.set('safeSearch', 'strict');
+  url.searchParams.set('videoEmbeddable', 'true');
+  url.searchParams.set('maxResults', Math.min(maxResults, 50));
+  url.searchParams.set('q', query);
+  url.searchParams.set('key', key);
 
-// ensure cache directory exists
-if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+  const res = await fetch(url.toString());
+  if (!res.ok) {
+    // rotate key on error
+    return [];
+  }
+  const data = await res.json();
+  const items = (data.items || []).map(it => ({
+    id: it.id && it.id.videoId ? it.id.videoId : null,
+    title: it.snippet?.title || '',
+    channel: it.snippet?.channelTitle || '',
+    thumb: it.snippet?.thumbnails?.medium?.url || it.snippet?.thumbnails?.default?.url || '',
+  })).filter(v => v.id);
 
-// ---------- helpers ----------
-function cachePath(range) {
-  return path.join(CACHE_DIR, `${range}.json`);
+  return items;
 }
 
-function searchUrl(range, key, pageToken = '') {
-  const q = encodeURIComponent(`${range} kids cartoons`);
-  const token = pageToken ? `&pageToken=${pageToken}` : '';
-  return `https://www.googleapis.com/youtube/v3/search?key=${key}&q=${q}&type=video&videoEmbeddable=true&maxResults=50${token}`;
-}
-
-// pull up to {count} videos using all keys, then write cache
-async function refreshRange(range, count = 100) {
-  const file = cachePath(range);
+async function fetchRange(range, targetCount = 100) {
+  const queries = RANGE_QUERIES[range] || [];
   let all = [];
-  let pageToken = '';
-
-  try {
-    for (const key of API_KEYS) {
-      // keep calling until we hit the count or no more pages
-      while (all.length < count) {
-        const queryList = RANGE_QUERIES[range] || ['educational kids videos'];
-        const q = queryList[Math.floor(Math.random() * queryList.length)];
-        const url = `https://www.googleapis.com/youtube/v3/search?key=${key}&q=${encodeURIComponent(q)}&type=video&maxResults=50&safeSearch=strict&videoEmbeddable=true&part=snippet`;
-        const r = await fetch(url);
-        const j = await r.json();
-
-        if (j.error) {
-          console.error('YouTube error:', j.error);
-          break; // try next key
-        }
-
-        if (Array.isArray(j.items)) {
-          all = all.concat(j.items);
-        }
-        pageToken = j.nextPageToken || '';
-        if (!pageToken) break; // no more pages from this key
+  for (const q of queries) {
+    const items = await ytSearch(q, 25);
+    // de-dupe by id
+    const seen = new Set(all.map(v => v.id));
+    for (const it of items) {
+      if (!seen.has(it.id)) {
+        all.push(it);
+        seen.add(it.id);
       }
-      if (all.length >= count) break;
+      if (all.length >= targetCount) break;
+    }
+    if (all.length >= targetCount) break;
+  }
+  return all.slice(0, targetCount);
+}
+
+// --- HEALTH (two paths, to be safe)
+app.get('/health', (req, res) => {
+  res.json({ ok: true, path: '/health', keys: KEY_POOL.length });
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, path: '/api/health', keys: KEY_POOL.length });
+});
+
+// --- VIDEOS: /api/videos/:range  (range: 1-2, 3-5, 6-8)
+// optional query: ?refresh=1 to bypass cache
+app.get('/api/videos/:range', async (req, res) => {
+  try {
+    const { range } = req.params;
+    const refresh = req.query.refresh === '1';
+    const now = Date.now();
+
+    if (!RANGE_QUERIES[range]) {
+      return res.status(400).json({ ok: false, error: 'invalid_range' });
     }
 
-    if (all.length > count) all = all.slice(0, count);
+    if (!refresh && cache[range] && now - cache[range].ts < CACHE_MS) {
+      return res.json({ ok: true, count: cache[range].items.length, items: cache[range].items, cached: true });
+    }
 
-    fs.writeFileSync(file, JSON.stringify(all, null, 2));
-    return { ok: true, count: all.length };
+    const items = await fetchRange(range, 100);
+    cache[range] = { ts: now, items };
+    res.json({ ok: true, count: items.length, items, cached: false });
   } catch (e) {
-    console.error('⚠️ Error refreshing', range, e);
-    return { ok: false, error: String(e) };
+    console.error('videos error', e);
+    res.status(500).json({ ok: false, error: 'server_error' });
   }
-}
-
-// ---------- routes ----------
-app.get('/health', (_req, res) => res.json({ ok: true }));
-
-// refresh one range
-app.get('/api/refresh/:range', async (req, res) => {
-  const count = Number(req.query.count || 100);
-  const range = req.params.range;
-  const result = await refreshRange(range, count);
-  return res.json(result);
 });
 
-// refresh all ranges (handy to test)
-app.get('/api/refresh/all', async (req, res) => {
-  const count = Number(req.query.count || 100);
-  const ranges = ['1-2','3-5','6-8'];
-  const out = {};
-  for (const r of ranges) {
-    out[r] = await refreshRange(r, count);
-  }
-  return res.json(out);
-});
-
-// serve cached videos
-app.get('/api/videos/:range', (req, res) => {
-  const file = cachePath(req.params.range);
-  if (!fs.existsSync(file)) return res.json({ ok: false, videos: [] });
-  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-  return res.json({ ok: true, videos: data });
-});
-
-// ---------- cron (3:00 AM every day) ----------
-cron.schedule('0 3 * * *', async () => {
-  console.log('⏰ Cron: refreshing caches (3:00 AM)…');
-  for (const r of ['1-2','3-5','6-8']) {
-    const result = await refreshRange(r, 100);
-    console.log(`   • ${r}:`, result);
-  }
-  console.log('✅ Cron: done.');
-});
-
-app.listen(PORT, () => {
+// --- Start server (Render needs 0.0.0.0)
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ KidVid server running on http://localhost:${PORT}`);
-  console.log('🗓️  Cron jobs scheduled for 03:00 daily.');
+  console.log(`🔑 Keys loaded: ${KEY_POOL.length}`);
 });
