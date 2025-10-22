@@ -1,7 +1,7 @@
 {
   "name": "kidvid-server",
   "version": "1.0.0",
-  "type": "module",
+  "type": "commonjs",
   "private": true,
   "scripts": {
     "start": "node index.js"
