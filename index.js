@@ -1,4 +1,3 @@
-
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
@@ -149,6 +148,41 @@ app.get("/diag", async (_req, res) => {
 
   res.json({ ok: true, test: testQ, results });
 });
+
+// ===== TEMP: show which env vars exist (no secrets leaked) =====
+app.get("/envcheck", (_req, res) => {
+  res.json({
+    YT_API_KEYS_present: !!process.env.YT_API_KEYS,
+    YT_API_KEYS_length: (process.env.YT_API_KEYS || "").length,
+    YT_API_KEY_present: !!process.env.YT_API_KEY,
+    YT_API_KEY_1_present: !!process.env.YT_API_KEY_1,
+    YT_API_KEY_2_present: !!process.env.YT_API_KEY_2,
+    YT_API_KEY_3_present: !!process.env.YT_API_KEY_3,
+  });
+});
+
+// also log at startup how many keys we actually loaded
+(function logLoadedKeys() {
+  try {
+    const fromList = (process.env.YT_API_KEYS || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const fromIndexed = [
+      process.env.YT_API_KEY_1,
+      process.env.YT_API_KEY_2,
+      process.env.YT_API_KEY_3,
+    ].filter(Boolean);
+
+    const single = process.env.YT_API_KEY ? [process.env.YT_API_KEY] : [];
+
+    const all = [...fromList, ...fromIndexed, ...single].map((k) => k.trim());
+    console.log("[kidvid-server] Loaded YT keys count:", all.length);
+  } catch (e) {
+    console.log("[kidvid-server] Key load error:", e);
+  }
+})();
 
 app.listen(PORT, () => {
   console.log(`kidvid-server running on :${PORT}, keys loaded: ${KEYS.length}`);
