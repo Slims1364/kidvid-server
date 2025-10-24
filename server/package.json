@@ -1,0 +1,16 @@
+{
+  "type": "module",
+  "name": "kidvid-server",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "node-cron": "^4.2.1",
+    "node-fetch": "^3.3.2"
+  }
+}
