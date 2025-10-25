@@ -1,127 +1,169 @@
-// server/index.js — ESM + node-fetch v3 + caching
-import * as dotenv from "dotenv";
-dotenv.config();
-
+// server/index.js
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
-import { promises as fs } from "fs";
+import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
-app.use(cors({ origin: "*" }));
+app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3001;
+/* ---------- CONFIG ---------- */
+const PORT = process.env.PORT || 10000;
 
-// ---------- Cache config ----------
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const CACHE_DIR = path.join(__dirname, "cache");
-const CACHE_TTL_MS =
-  (Number(process.env.CACHE_TTL_SECONDS || 0) || 6 * 60 * 60) * 1000; // 6h
-const AGE_KEYS = new Set(["1", "2", "3", "5", "6", "8", "r"]);
+// Cache directory (server/cache)
+const __dirname = path.dirname(new URL(import.meta.url).pathname);
+const CACHE_DIR = path.resolve(__dirname, "cache");
+if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
-await fs.mkdir(CACHE_DIR, { recursive: true }).catch(() => {});
+// TTLs (milliseconds)
+const TTL_AGE_FEED = 6 * 60 * 60 * 1000;    // 6 hours for age feeds
+const TTL_SEARCH   = 1 * 60 * 60 * 1000;    // 1 hour for typed searches
 
-// ---------- API keys ----------
-function loadKeys() {
-  const raw =
-    process.env.YT_API_KEYS ||
-    process.env.YOUTUBE_API_KEYS ||
-    process.env.YOUTUBE_API_KEY ||
-    "";
-  return String(raw).split(",").map(s => s.trim()).filter(Boolean);
-}
-function pickKey(keys) {
-  if (!keys.length) return null;
-  const idx = Math.floor(Date.now() / 1000) % keys.length;
-  return keys[idx];
+// Your rotating API keys
+const API_KEYS = [
+  process.env.YOUTUBE_API_KEY_1,
+  process.env.YOUTUBE_API_KEY_2,
+  process.env.YOUTUBE_API_KEY_3,
+].filter(Boolean);
+
+let rr = 0;
+function nextKey() {
+  if (!API_KEYS.length) {
+    throw new Error("No YouTube API keys configured in ENV (YOUTUBE_API_KEY_1..3).");
+  }
+  const key = API_KEYS[rr % API_KEYS.length];
+  rr++;
+  return key;
 }
 
-// ---------- Helpers ----------
-function mapItem(it) {
-  const id = it?.id?.videoId || "";
-  const sn = it?.snippet || {};
-  const thumb =
-    sn?.thumbnails?.medium?.url ||
-    sn?.thumbnails?.high?.url ||
-    sn?.thumbnails?.default?.url ||
-    "";
-  return {
-    id,
-    title: sn?.title || "",
-    thumbnail: thumb,
-    src: `https://www.youtube.com/watch?v=${id}`,
-    sourceUrl: `https://www.youtube.com/watch?v=${id}`,
-  };
+/* ---------- HELPERS ---------- */
+function slug(s = "") {
+  return String(s)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
 }
-function slug(s) {
-  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+
+function cachePathFor({ age = "all", q = "" }) {
+  if (q && q.trim()) {
+    return path.join(CACHE_DIR, `search-${slug(age)}-${slug(q)}.json`);
+  }
+  return path.join(CACHE_DIR, `${slug(age || "all")}.json`);
 }
-async function readJsonIfFresh(filePath, ttlMs) {
+
+function isFresh(filePath, ttlMs) {
   try {
-    const stat = await fs.stat(filePath);
-    if (Date.now() - stat.mtimeMs > ttlMs) return null;
-    const txt = await fs.readFile(filePath, "utf8");
-    return JSON.parse(txt);
-  } catch { return null; }
-}
-async function writeJson(filePath, data) {
-  try { await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf8"); }
-  catch (e) { console.error("Cache write failed:", e?.message); }
+    const stat = fs.statSync(filePath);
+    return Date.now() - stat.mtimeMs < ttlMs;
+  } catch {
+    return false;
+  }
 }
 
-// ---------- Routes ----------
-app.get("/", (_req, res) => res.type("text/plain").send("KidVid server OK"));
+function mapYouTube(items = []) {
+  return items
+    .map((it) => {
+      const id = it.id?.videoId || it.id;
+      const sn = it.snippet || {};
+      const thumb =
+        sn.thumbnails?.medium?.url ||
+        sn.thumbnails?.high?.url ||
+        sn.thumbnails?.default?.url ||
+        "";
+      return id && thumb
+        ? {
+            id,
+            title: sn.title || "",
+            thumbnail: thumb,
+            sourceUrl: `https://www.youtube.com/watch?v=${id}`,
+          }
+        : null;
+    })
+    .filter(Boolean);
+}
 
-app.get("/videos", async (req, res) => {
+/* ---------- YOUTUBE FETCH ---------- */
+async function fetchYouTube({ q, max = 24 }) {
+  const key = nextKey();
+  const params = new URLSearchParams({
+    key,
+    part: "snippet",
+    maxResults: String(max),
+    type: "video",
+    safeSearch: "strict",
+    q: q || "kids cartoons",
+  });
+
+  const url = `https://www.googleapis.com/youtube/v3/search?${params.toString()}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`YouTube API error ${res.status}: ${text}`);
+  }
+  const json = await res.json();
+  return mapYouTube(json.items || []);
+}
+
+/* ---------- ROUTES ---------- */
+
+// Health
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, time: new Date().toISOString() });
+});
+
+// Main videos endpoint
+// GET /videos?age=3-5&q=paw%20patrol
+// ✅ Main videos endpoint (now supports /api/videos too)
+app.get(['/videos', '/api/videos'], async (req, res) => {
   try {
-    const q = (req.query.q || "").toString().trim();
-    const age = (req.query.age || "").toString().trim();
-    const refresh = req.query.refresh === "1" || req.query.refresh === "true";
+    const age = String(req.query.age || "all");
+    const q = String(req.query.q || "");
 
-    let cacheFile = "all.json";
-    if (!q && AGE_KEYS.has(age)) cacheFile = `${age}.json`;
-    else if (q) cacheFile = `search-${slug(q)}.json`;
-    const cachePath = path.join(CACHE_DIR, cacheFile);
+    const cacheFile = cachePath(q, age);
+    const ttl = q.trim() ? TTL_SEARCH : TTL_AGE_FEED;
 
-    if (!refresh) {
-      const cached = await readJsonIfFresh(cachePath, CACHE_TTL_MS);
-      if (cached && Array.isArray(cached)) return res.json(cached);
+    // 1) Serve cached results if still fresh
+    if (isFresh(cacheFile, ttl)) {
+      const cached = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+      console.log("✅ Serving from cache:", path.basename(cacheFile));
+      return res.json({ ok: true, cached: true, items: cached });
     }
 
-    const terms = [q, AGE_KEYS.has(age) ? `age ${age}` : age].filter(Boolean).join(" ").trim() || "cartoons for kids";
-    const keys = loadKeys();
-    const apiKey = pickKey(keys);
-    if (!apiKey) {
-      return res.status(500).json({ error: "No YouTube API key in ENV (set YT_API_KEYS or YOUTUBE_API_KEYS or YOUTUBE_API_KEY)" });
+    // 2) Build search term by age if no manual query
+    let effectiveQ = q.trim();
+    if (!effectiveQ) {
+      if (age === "1-2") effectiveQ = "toddler learning colors cartoons";
+      else if (age === "3-5") effectiveQ = "preschool cartoons full episodes";
+      else if (age === "6-8") effectiveQ = "kids animated series";
+      else effectiveQ = "kids cartoons";
     }
 
-    const url = new URL("https://www.googleapis.com/youtube/v3/search");
-    url.searchParams.set("part", "snippet");
-    url.searchParams.set("type", "video");
-    url.searchParams.set("maxResults", "24");
-    url.searchParams.set("q", terms);
-    url.searchParams.set("safeSearch", "strict");
-    url.searchParams.set("order", "relevance");
-    url.searchParams.set("key", apiKey);
+    // 3) Fetch from YouTube
+    const items = await fetchYouTube({ q: effectiveQ });
 
-    const r = await fetch(url.toString());
-    if (!r.ok) {
-      const text = await r.text();
-      return res.status(r.status).json({ error: `YouTube API ${r.status}: ${text}` });
+    // 4) Save cache (best effort)
+    try {
+      fs.writeFileSync(cacheFile, JSON.stringify(items, null, 2));
+      console.log("📝 Wrote cache:", path.basename(cacheFile));
+    } catch (e2) {
+      console.warn("Cache write failed:", e2?.message || e2);
     }
-    const j = await r.json();
-    const items = Array.isArray(j?.items) ? j.items.map(mapItem).filter(x => x.id) : [];
 
-    writeJson(cachePath, items).catch(() => {});
-    return res.json(items);
+    return res.json({ ok: true, cached: false, items });
   } catch (err) {
-    console.error("ERROR /videos:", err);
-    return res.status(500).json({ error: err?.message || "server error" });
+    console.error("❌ videos route failed:", err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
-app.listen(PORT, () => console.log(`KidVid server listening on ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`KidVid server listening on ${PORT}`);
+  console.log(`Cache dir: ${CACHE_DIR}`);
+});
+
