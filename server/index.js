@@ -119,51 +119,51 @@ app.get("/health", (_req, res) => {
 
 // Main videos endpoint
 // GET /videos?age=3-5&q=paw%20patrol
-// ✅ Main videos endpoint (now supports /api/videos too)
-app.get(['/videos', '/api/videos'], async (req, res) => {
+app.get("/videos", async (req, res) => {
   try {
     const age = String(req.query.age || "all");
-    const q = String(req.query.q || "");
+    const q   = String(req.query.q || "");
 
-    const cacheFile = cachePath(q, age);
+    const cacheFile = cachePathFor({ age, q });
     const ttl = q.trim() ? TTL_SEARCH : TTL_AGE_FEED;
 
-    // 1) Serve cached results if still fresh
+    // 1) Serve fresh cache first (NO API hit)
     if (isFresh(cacheFile, ttl)) {
       const cached = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
       console.log("✅ Serving from cache:", path.basename(cacheFile));
       return res.json({ ok: true, cached: true, items: cached });
     }
 
-    // 2) Build search term by age if no manual query
+    // 2) Build the effective query
     let effectiveQ = q.trim();
     if (!effectiveQ) {
+      // seed per age if needed (light defaults—you can customize)
       if (age === "1-2") effectiveQ = "toddler learning colors cartoons";
       else if (age === "3-5") effectiveQ = "preschool cartoons full episodes";
       else if (age === "6-8") effectiveQ = "kids animated series";
       else effectiveQ = "kids cartoons";
     }
 
-    // 3) Fetch from YouTube
+    // 3) Fetch from YouTube (API hit)
     const items = await fetchYouTube({ q: effectiveQ });
 
-    // 4) Save cache (best effort)
+    // 4) Save/refresh cache (best effort)
     try {
       fs.writeFileSync(cacheFile, JSON.stringify(items, null, 2));
-      console.log("📝 Wrote cache:", path.basename(cacheFile));
-    } catch (e2) {
-      console.warn("Cache write failed:", e2?.message || e2);
+      console.log("💾 Wrote cache:", path.basename(cacheFile));
+    } catch (e) {
+      console.warn("Cache write failed:", e?.message);
     }
 
     return res.json({ ok: true, cached: false, items });
   } catch (err) {
-    console.error("❌ videos route failed:", err);
+    console.error(err);
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
+/* ---------- START ---------- */
 app.listen(PORT, () => {
   console.log(`KidVid server listening on ${PORT}`);
   console.log(`Cache dir: ${CACHE_DIR}`);
 });
-
