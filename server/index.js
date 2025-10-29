@@ -16,7 +16,7 @@ const PORT = process.env.PORT || 3001;
 // comma-separated keys in env
 const RAW_KEYS =
   process.env.YOUTUBE_API_KEYS ||
-  "AIzaSyD7EySVbSNQcR6NDHJCyVnRJ2nab7exWNU,AIzaSyCp7Ws9TEIXjVX8ehWITpUfPRTyS0miXMU,AIzaSyC3h6glOKinI3lR3ERDMKB-cvKmbQjH4K4";
+  "AIzaSyC3h6glOKinI3lR3ERDMKB-cvKmbQjH4K4,AIzaSyCp7Ws9TEIXjVX8ehWITpUfPRTyS0miXMU,AIzaSyD7EySVbSNQcR6NDHJCyVnRJ2nab7exWNU";
 const KEYS = RAW_KEYS.split(",").map((s) => s.trim()).filter(Boolean);
 let keyIndex = 0;
 
@@ -170,3 +170,4 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log(`kidvid-server listening on ${PORT}`);
 });
+
