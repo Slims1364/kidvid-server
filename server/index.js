@@ -166,6 +166,17 @@ app.get("/debug/keys", (_req, res) => {
 
 // Start
 const PORT = process.env.PORT || 3001;
+app.get("/testyt", async (_req, res) => {
+  try {
+    const key = KEYS[0];
+    const resp = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=1&q=Bluey&key=${key}`);
+    const txt = await resp.text();
+    res.type("text").send(txt);
+  } catch (e) {
+    res.status(500).send(String(e));
+  }
+});
+
 app.listen(PORT, () => {
   log.info({ port: PORT, keys: KEYS.length }, "kidvid-server listening");
 });
