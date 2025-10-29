@@ -14,69 +14,50 @@ import { LRUCache } from "lru-cache";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// 1) Load .env from the /server folder (if present)
-//    Render also injects env vars; this does not override them.
+// Load .env from /server if present
 dotenv.config({ path: path.join(__dirname, ".env") });
 
-// 2) Read YT keys from env.
-//    Supports both plural and singular names.
+// Keys (plural fallback to singular)
 const RAW_KEYS =
   process.env.YOUTUBE_API_KEYS ||
   process.env.YOUTUBE_API_KEY ||
   "";
 
 const KEYS = RAW_KEYS.split(",").map(s => s.trim()).filter(Boolean);
-
-if (KEYS.length === 0) {
-  // Log clear message but keep server alive for health checks.
-  console.error("[BOOT] No YouTube API keys found in env. Set YOUTUBE_API_KEYS.");
-}
-
 let keyIndex = 0;
 
-// 3) App + logging
 const app = express();
 const log = pino({ level: process.env.LOG_LEVEL || "info" });
 app.use(pinoHttp({ logger: log }));
 app.use(cors());
 app.use(express.json());
 
-// 4) Cache: 15 minutes, up to 200 entries
+// Cache 15 min
 const cache = new LRUCache({ max: 200, ttl: 1000 * 60 * 15 });
 
-// 5) Categories
+// Categories
 const categoriesPath = path.join(__dirname, "categories.json");
 const categories = JSON.parse(fs.readFileSync(categoriesPath, "utf8"));
 
-// 6) Helper: rotated YouTube fetch with key failover
+// YouTube helpers
 async function ytJson(url) {
-  if (KEYS.length === 0) {
-    throw new Error("NO_KEYS_CONFIGURED");
-  }
+  if (!KEYS.length) throw new Error("NO_KEYS_CONFIGURED");
   const sep = url.includes("?") ? "&" : "?";
-
-  // try each key once
   for (let attempt = 0; attempt < KEYS.length; attempt++) {
     const key = KEYS[keyIndex % KEYS.length];
     const full = `${url}${sep}key=${key}`;
     const resp = await fetch(full);
-
     if (resp.ok) return resp.json();
 
     const text = await resp.text();
-
-    // rotate on quota/denied
     if (resp.status === 403 || resp.status === 429) {
       log.warn({ status: resp.status, attempt, msg: "YT quota/denied", keyHead: key.slice(0,8) });
       keyIndex++;
       continue;
     }
-
-    // other HTTP errors: do not rotate further
     log.error({ status: resp.status, body: text, msg: "YT hard error" });
     throw new Error(`YOUTUBE_HTTP_${resp.status}`);
   }
-
   throw new Error("ALL_KEYS_EXHAUSTED");
 }
 
@@ -100,10 +81,10 @@ async function ytVideosById(ids) {
   return ytJson(base.toString());
 }
 
-// 7) Routes
+// Routes
 app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
-// GET /videos?age=1-2&limit=100
+// FIXED /videos: reset pageToken per query
 app.get("/videos", async (req, res) => {
   try {
     const age = String(req.query.age || "3-5").trim();
@@ -113,20 +94,20 @@ app.get("/videos", async (req, res) => {
 
     const queries = categories[age] || categories["3-5"];
     const picked = new Set();
-    let token = "";
-    let qi = 0;
 
-    // collect until limit
-    while (picked.size < limit && qi < queries.length * 6) {
-      const q = queries[qi % queries.length];
-      const r = await ytSearch({ q, maxResults: 25, pageToken: token });
-      const ids = (r.items || []).map(i => i?.id?.videoId).filter(Boolean);
-      for (const id of ids) {
-        if (picked.size >= limit) break;
-        picked.add(id);
+    for (const q of queries) {
+      let token = ""; // reset for each query
+      while (picked.size < limit) {
+        const r = await ytSearch({ q, maxResults: 25, pageToken: token });
+        const ids = (r.items || []).map(i => i?.id?.videoId).filter(Boolean);
+        for (const id of ids) {
+          if (picked.size >= limit) break;
+          picked.add(id);
+        }
+        token = r.nextPageToken || "";
+        if (!token) break;
       }
-      token = r.nextPageToken || "";
-      qi++;
+      if (picked.size >= limit) break;
     }
 
     const list = Array.from(picked).slice(0, limit);
@@ -148,7 +129,7 @@ app.get("/videos", async (req, res) => {
   }
 });
 
-// GET /search?q=bluey&limit=40
+// Search route
 app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -177,18 +158,13 @@ app.get("/search", async (req, res) => {
   }
 });
 
-// 8) Minimal debug (safe: only shows counts and first 8 chars)
+// Debug
 app.get("/debug/keys", (_req, res) => {
-  const raw = RAW_KEYS;
   const list = KEYS;
-  res.json({
-    present: !!raw,
-    count: list.length,
-    heads: list.map(k => k.slice(0, 8))
-  });
+  res.json({ present: !!RAW_KEYS, count: list.length, heads: list.map(k => k.slice(0,8)) });
 });
 
-// 9) Start
+// Start
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   log.info({ port: PORT, keys: KEYS.length }, "kidvid-server listening");
