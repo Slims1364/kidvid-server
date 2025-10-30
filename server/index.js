@@ -58,7 +58,7 @@ async function fetchBrandEpisodes(brand, count) {
     token = r.nextPageToken || "";
     if (!token) break;
   }
-  const s = daySeed() ^ hash(brand);
+  const s = Math.floor(Date.now() / 86400000) ^ hash(brand);
   const pick = seededShuffle(out, s).slice(0, count);
   return pick;
 }
@@ -139,9 +139,11 @@ app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 // FIXED /videos: reset pageToken per query
 app.get("/videos", async (req, res) => {
   try {
+    
+    const day = Math.floor(Date.now() / 86400000);
     const age = String(req.query.age || "3-5").trim();
     const limit = Math.min(parseInt(String(req.query.limit || "100"), 10), 100);
-    const cacheKey = `videos:${age}:${limit}`;
+    const cacheKey = `videos:${age}:${limit}:${day}`;
     if (cache.has(cacheKey)) return res.json(cache.get(cacheKey));
 
     const queries = categories[age] || categories["3-5"];
@@ -174,6 +176,7 @@ app.get("/videos", async (req, res) => {
 
     const payload = { age, count: items.length, items };
     if (items.length) cache.set(cacheKey, payload);
+    console.log("✅ Cached videos for:", cacheKey);
     res.json(payload);
   } catch (err) {
     req.log.error({ err: String(err) }, "failed_to_fetch_videos");
