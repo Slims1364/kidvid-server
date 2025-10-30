@@ -11,6 +11,58 @@ import pino from "pino";
 import pinoHttp from "pino-http";
 import { LRUCache } from "lru-cache";
 
+const PINNED_SHOWS = {
+  "1-2": {
+    "Cocomelon": 10,
+    "Ms Rachel": 6,
+    "Baby Einstein": 4,
+    "Blippi": 4
+  },
+  "3-5": {
+    "Bluey": 10,
+    "Peppa Pig": 6,
+    "Paw Patrol": 6,
+    "Numberblocks": 2
+  },
+  "6-8": {
+    "Wild Kratts": 6,
+    "Ninjago": 6,
+    "Magic School Bus": 6,
+    "Oddbods": 6
+  }
+};
+
+// --- rotation helpers ---
+const daySeed = () => {
+  const d = new Date();
+  return Number(`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,"0")}${String(d.getUTCDate()).padStart(2,"0")}`);
+};
+const hash = (s) => [...s].reduce((a,c)=>((a<<5)-a+c.charCodeAt(0))|0,0) >>> 0;
+function seededShuffle(arr, seed) {
+  let a = arr.slice(), r = seed >>> 0;
+  for (let i = a.length - 1; i > 0; i--) {
+    r = (1664525 * r + 1013904223) >>> 0;
+    const j = r % (i + 1);
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+async function fetchBrandEpisodes(brand, count) {
+  // pull up to ~50 candidates for the brand, then pick a daily-rotating subset
+  let out = [];
+  let token = "";
+  for (let page = 0; page < 2 && out.length < 50; page++) {
+    const r = await ytSearch({ q: `${brand} kids full episode`, maxResults: 25, pageToken: token });
+    const ids = (r.items || []).map(i => i?.id?.videoId).filter(Boolean);
+    out.push(...ids);
+    token = r.nextPageToken || "";
+    if (!token) break;
+  }
+  const s = daySeed() ^ hash(brand);
+  const pick = seededShuffle(out, s).slice(0, count);
+  return pick;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -121,7 +173,7 @@ app.get("/videos", async (req, res) => {
     }));
 
     const payload = { age, count: items.length, items };
-    cache.set(cacheKey, payload);
+    if (items.length) cache.set(cacheKey, payload);
     res.json(payload);
   } catch (err) {
     req.log.error({ err: String(err) }, "failed_to_fetch_videos");
