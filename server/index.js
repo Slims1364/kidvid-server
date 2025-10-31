@@ -159,7 +159,6 @@ app.get("/videos", async (req, res) => {
   try {
     const age = String(req.query.age || "3-5").trim();
     const limit = Math.min(parseInt(String(req.query.limit || "48"), 10), 48);
-
     const day = Math.floor(Date.now() / 86400000);
     const cacheKey = `videos:${age}:${limit}:${day}`;
     if (cache.has(cacheKey)) return res.json(cache.get(cacheKey));
@@ -222,6 +221,7 @@ app.get("/videos", async (req, res) => {
 
     const payload = { age, count: items.length, items, pinnedBrands };
     if (items.length) cache.set(cacheKey, payload);
+    console.log("✅ Cached videos for:", cacheKey);
     res.json(payload);
   } catch (err) {
     req.log.error({ err: String(err) }, "failed_to_fetch_videos");
