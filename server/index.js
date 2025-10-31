@@ -11,6 +11,13 @@ import pino from "pino";
 import pinoHttp from "pino-http";
 import { LRUCache } from "lru-cache";
 
+try {
+  if (!process.env.RENDER) {
+    const dotenv = await import("dotenv");
+    dotenv.config();
+  }
+} catch {}
+
 const PINNED_SHOWS = {
   "1-2": {
     "Cocomelon": 10,
