@@ -6,7 +6,6 @@ import { fileURLToPath } from "url";
 import fs from "fs";
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
 import pino from "pino";
 import pinoHttp from "pino-http";
 import { LRUCache } from "lru-cache";
@@ -91,8 +90,11 @@ app.use(pinoHttp({ logger: log }));
 app.use(cors());
 app.use(express.json());
 
-// Cache 15 min
-const cache = new LRUCache({ max: 200, ttl: 1000 * 60 * 15 });
+// Cache 24 hours
+const cache = new LRUCache({
+  max: 200,
+  ttl: 1000 * 60 * 60 * 24, // 24 hours
+});
 
 // Categories
 const categoriesPath = path.join(__dirname, "categories.json");
