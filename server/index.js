@@ -1,248 +1,172 @@
-// server/index.js
-
-import dotenv from "dotenv";
-import path from "path";
-import { fileURLToPath } from "url";
-import fs from "fs";
 import express from "express";
 import cors from "cors";
+import fetch from "node-fetch";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import pino from "pino";
 import pinoHttp from "pino-http";
-import { LRUCache } from "lru-cache";
-
-try {
-  if (!process.env.RENDER) {
-    const dotenv = await import("dotenv");
-    dotenv.config();
-  }
-} catch {}
-
-const PINNED_SHOWS = {
-  "1-2": {
-    "Cocomelon": 10,
-    "Ms Rachel": 6,
-    "Baby Einstein": 4,
-    "Blippi": 4
-  },
-  "3-5": {
-    "Bluey": 10,
-    "Peppa Pig": 6,
-    "Paw Patrol": 6,
-    "Numberblocks": 2
-  },
-  "6-8": {
-    "Wild Kratts": 6,
-    "Ninjago": 6,
-    "Magic School Bus": 6,
-    "Oddbods": 6
-  }
-};
-
-// --- rotation helpers ---
-const daySeed = () => {
-  const d = new Date();
-  return Number(`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,"0")}${String(d.getUTCDate()).padStart(2,"0")}`);
-};
-const hash = (s) => [...s].reduce((a,c)=>((a<<5)-a+c.charCodeAt(0))|0,0) >>> 0;
-function seededShuffle(arr, seed) {
-  let a = arr.slice(), r = seed >>> 0;
-  for (let i = a.length - 1; i > 0; i--) {
-    r = (1664525 * r + 1013904223) >>> 0;
-    const j = r % (i + 1);
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-async function fetchBrandEpisodes(brand, count) {
-  // pull up to ~50 candidates for the brand, then pick a daily-rotating subset
-  let out = [];
-  let token = "";
-  for (let page = 0; page < 2 && out.length < 50; page++) {
-    const r = await ytSearch({ q: `${brand} kids full episode`, maxResults: 25, pageToken: token });
-    const ids = (r.items || []).map(i => i?.id?.videoId).filter(Boolean);
-    out.push(...ids);
-    token = r.nextPageToken || "";
-    if (!token) break;
-  }
-  const s = Math.floor(Date.now() / 86400000) ^ hash(brand);
-  const pick = seededShuffle(out, s).slice(0, count);
-  return pick;
-}
+import LRU from "lru-cache";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load .env from /server if present
-dotenv.config({ path: path.join(__dirname, ".env") });
+const PORT = process.env.PORT || 3001;
 
-// Keys (plural fallback to singular)
+// comma-separated keys in env
 const RAW_KEYS =
   process.env.YOUTUBE_API_KEYS ||
-  process.env.YOUTUBE_API_KEY ||
-  "";
-
-const KEYS = RAW_KEYS.split(",").map(s => s.trim()).filter(Boolean);
+  "AIzaSyC3h6glOKinI3lR3ERDMKB-cvKmbQjH4K4,AIzaSyCp7Ws9TEIXjVX8ehWITpUfPRTyS0miXMU,AIzaSyD7EySVbSNQcR6NDHJCyVnRJ2nab7exWNU";
+const KEYS = RAW_KEYS.split(",").map((s) => s.trim()).filter(Boolean);
 let keyIndex = 0;
 
+const categories = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "categories.json"), "utf8")
+);
+
 const app = express();
-const log = pino({ level: process.env.LOG_LEVEL || "info" });
-app.use(pinoHttp({ logger: log }));
 app.use(cors());
 app.use(express.json());
+app.use(pinoHttp({ logger: pino() }));
 
-// Cache 24 hours
-const cache = new LRUCache({
-  max: 200,
-  ttl: 1000 * 60 * 60 * 24, // 24 hours
-});
+// 15 min cache for list results. 200 items max.
+const cache = new LRU({ max: 200, ttl: 1000 * 60 * 15 });
 
-// Categories
-const categoriesPath = path.join(__dirname, "categories.json");
-const categories = JSON.parse(fs.readFileSync(categoriesPath, "utf8"));
-
-// YouTube helpers
-async function ytJson(url) {
-  if (!KEYS.length) throw new Error("NO_KEYS_CONFIGURED");
-  const sep = url.includes("?") ? "&" : "?";
-  for (let attempt = 0; attempt < KEYS.length; attempt++) {
+const yt = async (url) => {
+  // rotate key on quota or 403/429
+  let tries = 0;
+  while (tries < KEYS.length) {
     const key = KEYS[keyIndex % KEYS.length];
-    const full = `${url}${sep}key=${key}`;
-    const resp = await fetch(full);
+    const sep = url.includes("?") ? "&" : "?";
+    const resp = await fetch(`${url}${sep}key=${key}`);
     if (resp.ok) return resp.json();
 
-    const text = await resp.text();
-    if (resp.status === 403 || resp.status === 429) {
-      log.warn({ status: resp.status, attempt, msg: "YT quota/denied", keyHead: key.slice(0,8) });
+    // try next key on common quota errors
+    if ([403, 429].includes(resp.status)) {
       keyIndex++;
+      tries++;
       continue;
     }
-    log.error({ status: resp.status, body: text, msg: "YT hard error" });
-    throw new Error(`YOUTUBE_HTTP_${resp.status}`);
+    // non-retry error
+    const text = await resp.text();
+    throw new Error(`YouTube error ${resp.status}: ${text}`);
   }
-  throw new Error("ALL_KEYS_EXHAUSTED");
-}
+  throw new Error("All API keys exhausted");
+};
 
-async function ytSearch({ q, maxResults = 25, pageToken = "", safeSearch = "strict" }) {
-  const base = new URL("https://www.googleapis.com/youtube/v3/search");
-  base.searchParams.set("part", "snippet");
-  base.searchParams.set("type", "video");
-  base.searchParams.set("videoEmbeddable", "true");
-  base.searchParams.set("maxResults", String(maxResults));
-  base.searchParams.set("safeSearch", safeSearch);
-  base.searchParams.set("q", q);
-  if (pageToken) base.searchParams.set("pageToken", pageToken);
-  return ytJson(base.toString());
-}
+const searchYouTube = async ({
+  q,
+  maxResults = 20,
+  pageToken = "",
+  safeSearch = "strict"
+}) => {
+  const base =
+    "https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoEmbeddable=true&maxResults=" +
+    encodeURIComponent(maxResults) +
+    "&q=" +
+    encodeURIComponent(q) +
+    (pageToken ? `&pageToken=${pageToken}` : "") +
+    `&safeSearch=${safeSearch}`;
+  return yt(base);
+};
 
-async function ytVideosById(ids) {
+const videosByIds = async (ids) => {
   if (!ids.length) return { items: [] };
-  const base = new URL("https://www.googleapis.com/youtube/v3/videos");
-  base.searchParams.set("part", "snippet,contentDetails,statistics");
-  base.searchParams.set("id", ids.join(","));
-  return ytJson(base.toString());
-}
+  const base =
+    "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics&id=" +
+    encodeURIComponent(ids.join(","));
+  return yt(base);
+};
 
-// Routes
-app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
-
-// FIXED /videos: reset pageToken per query
+// GET /videos?age=1-2&limit=100
 app.get("/videos", async (req, res) => {
   try {
-    
-    const day = Math.floor(Date.now() / 86400000);
-    const age = String(req.query.age || "3-5").trim();
-    const limit = Math.min(parseInt(String(req.query.limit || "100"), 10), 100);
-    const cacheKey = `videos:${age}:${limit}:${day}`;
+    const age = (req.query.age || "3-5").trim();
+    const limit = Math.min(parseInt(req.query.limit || "100", 10), 100);
+    const cacheKey = `videos:${age}:${limit}`;
     if (cache.has(cacheKey)) return res.json(cache.get(cacheKey));
 
     const queries = categories[age] || categories["3-5"];
-    const picked = new Set();
+    const picked = [];
+    let token = "";
 
-    for (const q of queries) {
-      let token = ""; // reset for each query
-      while (picked.size < limit) {
-        const r = await ytSearch({ q, maxResults: 25, pageToken: token });
-        const ids = (r.items || []).map(i => i?.id?.videoId).filter(Boolean);
-        for (const id of ids) {
-          if (picked.size >= limit) break;
-          picked.add(id);
-        }
-        token = r.nextPageToken || "";
-        if (!token) break;
+    // pull until limit
+    while (picked.length < limit) {
+      const q = queries[picked.length % queries.length];
+      const r = await searchYouTube({
+        q,
+        maxResults: 25,
+        pageToken: token
+      });
+      const ids = (r.items || []).map((i) => i.id.videoId).filter(Boolean);
+      token = r.nextPageToken || "";
+
+      // de-dup
+      for (const id of ids) {
+        if (!picked.includes(id)) picked.push(id);
+        if (picked.length === limit) break;
       }
-      if (picked.size >= limit) break;
+      if (!token && picked.length < limit) token = ""; // move on to next query
+      if (!r.items?.length && !token) break;
     }
 
-    const list = Array.from(picked).slice(0, limit);
-    const meta = await ytVideosById(list);
-    const items = (meta.items || []).map(v => ({
-      id: v.id,
-      title: v.snippet?.title || "",
-      channel: v.snippet?.channelTitle || "",
-      thumb: v.snippet?.thumbnails?.medium?.url || v.snippet?.thumbnails?.default?.url || "",
-      duration: v.contentDetails?.duration || ""
-    }));
+    const meta = await videosByIds(picked.slice(0, limit));
+    const items =
+      meta.items?.map((v) => ({
+        id: v.id,
+        title: v.snippet.title,
+        channel: v.snippet.channelTitle,
+        thumb:
+          v.snippet.thumbnails?.medium?.url ||
+          v.snippet.thumbnails?.default?.url ||
+          "",
+        duration: v.contentDetails?.duration || ""
+      })) || [];
 
     const payload = { age, count: items.length, items };
-    if (items.length) cache.set(cacheKey, payload);
-    console.log("✅ Cached videos for:", cacheKey);
+    cache.set(cacheKey, payload);
     res.json(payload);
-  } catch (err) {
-    req.log.error({ err: String(err) }, "failed_to_fetch_videos");
+  } catch (e) {
+    req.log.error(e);
     res.status(500).json({ error: "failed_to_fetch_videos" });
   }
 });
 
-// Search route
+// GET /search?q=bluey&limit=30
 app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
-    const limit = Math.min(parseInt(String(req.query.limit || "40"), 10), 50);
+    const limit = Math.min(parseInt(req.query.limit || "30", 10), 50);
     if (!q) return res.json({ items: [] });
 
     const cacheKey = `search:${q}:${limit}`;
     if (cache.has(cacheKey)) return res.json(cache.get(cacheKey));
 
-    const r = await ytSearch({ q, maxResults: limit });
-    const ids = (r.items || []).map(i => i?.id?.videoId).filter(Boolean);
-    const meta = await ytVideosById(ids);
-    const items = (meta.items || []).map(v => ({
-      id: v.id,
-      title: v.snippet?.title || "",
-      channel: v.snippet?.channelTitle || "",
-      thumb: v.snippet?.thumbnails?.medium?.url || v.snippet?.thumbnails?.default?.url || ""
-    }));
-
+    const r = await searchYouTube({ q, maxResults: limit });
+    const ids = (r.items || []).map((i) => i.id.videoId).filter(Boolean);
+    const meta = await videosByIds(ids);
+    const items =
+      meta.items?.map((v) => ({
+        id: v.id,
+        title: v.snippet.title,
+        channel: v.snippet.channelTitle,
+        thumb:
+          v.snippet.thumbnails?.medium?.url ||
+          v.snippet.thumbnails?.default?.url ||
+          ""
+      })) || [];
     const payload = { q, count: items.length, items };
     cache.set(cacheKey, payload);
     res.json(payload);
-  } catch (err) {
-    req.log.error({ err: String(err) }, "search_failed");
+  } catch (e) {
+    req.log.error(e);
     res.status(500).json({ error: "search_failed" });
   }
 });
 
-// Debug
-app.get("/debug/keys", (_req, res) => {
-  const list = KEYS;
-  res.json({ present: !!RAW_KEYS, count: list.length, heads: list.map(k => k.slice(0,8)) });
-});
-
-// Start
-const PORT = process.env.PORT || 3001;
-app.get("/testyt", async (_req, res) => {
-  try {
-    const key = KEYS[0];
-    const resp = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=1&q=Bluey&key=${key}`);
-    const txt = await resp.text();
-    res.type("text").send(txt);
-  } catch (e) {
-    res.status(500).send(String(e));
-  }
-});
+// health
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
 app.listen(PORT, () => {
-  log.info({ port: PORT, keys: KEYS.length }, "kidvid-server listening");
+  console.log(`kidvid-server listening on ${PORT}`);
 });
-
-
