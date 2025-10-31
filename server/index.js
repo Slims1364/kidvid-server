@@ -7,7 +7,8 @@ import fs from "fs";
 import express from "express";
 import cors from "cors";
 import pino from "pino";
-import { LRUCache } from "lru-cache";
+import pinoHttp from "pino-http";
+import LRUCache from "lru-cache";
 
 try {
   if (!process.env.RENDER) {
@@ -243,3 +244,4 @@ app.get("/testyt", async (_req, res) => {
 app.listen(PORT, () => {
   log.info({ port: PORT, keys: KEYS.length }, "kidvid-server listening");
 });
+
