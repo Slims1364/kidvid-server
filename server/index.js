@@ -140,7 +140,8 @@ app.get("/videos", async (req, res) => {
     }));
 
     const payload = { age, count: items.length, items };
-    cache.set(cacheKey, payload);
+    if (items.length) cache.set(cacheKey, payload);
+    console.log("✅ Cached videos for:", cacheKey);
     res.json(payload);
   } catch (err) {
     req.log.error({ err: String(err) }, "failed_to_fetch_videos");
