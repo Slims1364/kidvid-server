@@ -92,12 +92,8 @@ app.use(pinoHttp({ logger: log }));
 app.use(cors());
 app.use(express.json());
 
-// 4) Cache: 24 hours, up to 200 entries
-const cache = new LRUCache({
-  max: 200,
-  ttl: 1000 * 60 * 60 * 24, // 24 hours
-});
-
+// 4) Cache: 15 minutes, up to 200 entries
+const cache = new LRUCache({ max: 200, ttl: 1000 * 60 * 15 });
 
 // 5) Categories
 const categoriesPath = path.join(__dirname, "categories.json");
@@ -225,7 +221,6 @@ app.get("/videos", async (req, res) => {
 
     const payload = { age, count: items.length, items, pinnedBrands };
     if (items.length) cache.set(cacheKey, payload);
-    console.log("✅ Cached videos for:", cacheKey);
     res.json(payload);
   } catch (err) {
     req.log.error({ err: String(err) }, "failed_to_fetch_videos");
