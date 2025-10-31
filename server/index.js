@@ -11,6 +11,58 @@ import pino from "pino";
 import pinoHttp from "pino-http";
 import { LRUCache } from "lru-cache";
 
+const PINNED_SHOWS = {
+  "1-2": {
+    "Cocomelon": 10,
+    "Ms Rachel": 6,
+    "Baby Einstein": 4,
+    "Blippi": 4
+  },
+  "3-5": {
+    "Bluey": 10,
+    "Peppa Pig": 6,
+    "Paw Patrol": 6,
+    "Numberblocks": 2
+  },
+  "6-8": {
+    "Wild Kratts": 6,
+    "Ninjago": 6,
+    "Magic School Bus": 6,
+    "Oddbods": 6
+  }
+};
+
+// --- rotation helpers ---
+const daySeed = () => {
+  const d = new Date();
+  return Number(`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,"0")}${String(d.getUTCDate()).padStart(2,"0")}`);
+};
+const hash = (s) => [...s].reduce((a,c)=>((a<<5)-a+c.charCodeAt(0))|0,0) >>> 0;
+function seededShuffle(arr, seed) {
+  let a = arr.slice(), r = seed >>> 0;
+  for (let i = a.length - 1; i > 0; i--) {
+    r = (1664525 * r + 1013904223) >>> 0;
+    const j = r % (i + 1);
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+async function fetchBrandEpisodes(brand, count) {
+  // pull up to ~50 candidates for the brand, then pick a daily-rotating subset
+  let out = [];
+  let token = "";
+  for (let page = 0; page < 2 && out.length < 50; page++) {
+    const r = await ytSearch({ q: `${brand} kids full episode`, maxResults: 25, pageToken: token });
+    const ids = (r.items || []).map(i => i?.id?.videoId).filter(Boolean);
+    out.push(...ids);
+    token = r.nextPageToken || "";
+    if (!token) break;
+  }
+  const s = Math.floor(Date.now() / 86400000) ^ hash(brand);
+  const pick = seededShuffle(out, s).slice(0, count);
+  return pick;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -103,34 +155,64 @@ async function ytVideosById(ids) {
 // 7) Routes
 app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
-// GET /videos?age=1-2&limit=100
+// GET /videos?age=1-2&limit=48  (pinned brands + daily rotation, cached per day)
 app.get("/videos", async (req, res) => {
   try {
     const age = String(req.query.age || "3-5").trim();
-    const limit = Math.min(parseInt(String(req.query.limit || "100"), 10), 100);
-    const cacheKey = `videos:${age}:${limit}`;
+    const limit = Math.min(parseInt(String(req.query.limit || "48"), 10), 48);
+
+    const day = Math.floor(Date.now() / 86400000);
+    const cacheKey = `videos:${age}:${limit}:${day}`;
     if (cache.has(cacheKey)) return res.json(cache.get(cacheKey));
 
-    const queries = categories[age] || categories["3-5"];
-    const picked = new Set();
-    let token = "";
-    let qi = 0;
+    // 1) Build pinned set (same brands, different episodes daily)
+    const pinnedSpec = PINNED_SHOWS[age] || {};
+    const pinnedBrands = Object.keys(pinnedSpec);
+    const pinnedIds = new Set();
 
-    // collect until limit
-    while (picked.size < limit && qi < queries.length * 6) {
-      const q = queries[qi % queries.length];
-      const r = await ytSearch({ q, maxResults: 25, pageToken: token });
-      const ids = (r.items || []).map(i => i?.id?.videoId).filter(Boolean);
+    for (const brand of pinnedBrands) {
+      const count = Math.max(0, pinnedSpec[brand] | 0);
+      if (!count) continue;
+      const ids = await fetchBrandEpisodes(brand, count);
       for (const id of ids) {
-        if (picked.size >= limit) break;
-        picked.add(id);
+        if (pinnedIds.size >= limit) break;
+        pinnedIds.add(id);
       }
-      token = r.nextPageToken || "";
-      qi++;
+      if (pinnedIds.size >= limit) break;
     }
 
-    const list = Array.from(picked).slice(0, limit);
-    const meta = await ytVideosById(list);
+    // 2) Rotation pool from categories.json excluding pinned brands
+    const queries = (categories[age] || []).filter(q =>
+      !pinnedBrands.some(b => q.toLowerCase().includes(b.toLowerCase()))
+    );
+
+    // deterministic daily shuffle of pool
+    const pool = seededShuffle(queries, day ^ hash(age));
+
+    // 3) Fill remaining slots with rotated pool, spaced to avoid burst limits
+    const remaining = Math.max(0, limit - pinnedIds.size);
+    const rotatedIds = new Set();
+    for (const q of pool) {
+      if (rotatedIds.size >= remaining) break;
+      let token = "";
+      let page = 0;
+      while (rotatedIds.size < remaining && page < 2) { // up to ~50 candidates per query
+        const r = await ytSearch({ q: `${q} kids full episode`, maxResults: 25, pageToken: token });
+        const ids = (r.items || []).map(i => i?.id?.videoId).filter(Boolean);
+        for (const id of ids) {
+          if (rotatedIds.size >= remaining) break;
+          if (!pinnedIds.has(id)) rotatedIds.add(id);
+        }
+        token = r.nextPageToken || "";
+        page++;
+        if (!token) break;
+        await new Promise(r => setTimeout(r, 200)); // rate-space
+      }
+    }
+
+    // 4) Merge, fetch metadata, respond
+    const finalIds = Array.from(pinnedIds).concat(Array.from(rotatedIds)).slice(0, limit);
+    const meta = await ytVideosById(finalIds);
     const items = (meta.items || []).map(v => ({
       id: v.id,
       title: v.snippet?.title || "",
@@ -139,9 +221,8 @@ app.get("/videos", async (req, res) => {
       duration: v.contentDetails?.duration || ""
     }));
 
-    const payload = { age, count: items.length, items };
+    const payload = { age, count: items.length, items, pinnedBrands };
     if (items.length) cache.set(cacheKey, payload);
-    console.log("✅ Cached videos for:", cacheKey);
     res.json(payload);
   } catch (err) {
     req.log.error({ err: String(err) }, "failed_to_fetch_videos");
@@ -149,7 +230,7 @@ app.get("/videos", async (req, res) => {
   }
 });
 
-// GET /search?q=bluey&limit=40
+    // GET /search?q=bluey&limit=40
 app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
