@@ -92,8 +92,12 @@ app.use(pinoHttp({ logger: log }));
 app.use(cors());
 app.use(express.json());
 
-// 4) Cache: 15 minutes, up to 200 entries
-const cache = new LRUCache({ max: 200, ttl: 1000 * 60 * 15 });
+// 4) Cache: 24 hours, up to 200 entries
+const cache = new LRUCache({
+  max: 200,
+  ttl: 1000 * 60 * 60 * 24, // 24 hours
+});
+
 
 // 5) Categories
 const categoriesPath = path.join(__dirname, "categories.json");
