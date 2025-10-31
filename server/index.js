@@ -1,3 +1,5 @@
+import dotenv from "dotenv";
+dotenv.config({ path: ".env" });
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
@@ -6,7 +8,10 @@ import path from "path";
 import { fileURLToPath } from "url";
 import pino from "pino";
 import pinoHttp from "pino-http";
-import LRU from "lru-cache";
+import { LRUCache } from "lru-cache";
+
+const LRU = LRUCache;
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
