@@ -11,8 +11,9 @@
     "node": "20.x"
   },
   "dependencies": {
-    "express": "^4.19.2",
     "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "lru-cache": "^10.2.2",
     "node-fetch": "^3.3.2",
     "pino": "^9.3.2",
     "pino-http": "^9.0.0"
