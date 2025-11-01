@@ -1,20 +1,20 @@
 {
-  "name": "kidvid-web",
+  "name": "kidvid-server",
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "main": "index.js",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": "20.x"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.1"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-react": "^4.3.2",
-    "vite": "^5.4.2"
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "node-fetch": "^3.3.2",
+    "pino": "^9.3.2",
+    "pino-http": "^9.0.0"
   }
 }
