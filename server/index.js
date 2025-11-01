@@ -4,7 +4,7 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import LRU from "lru-cache";
+import { LRUCache } from "lru-cache";
 import pino from "pino";
 import pinoHttp from "pino-http";
 
@@ -21,7 +21,7 @@ let keyIdx = 0;
 
 const categories = JSON.parse(fs.readFileSync(path.join(__dirname, "categories.json"), "utf8"));
 
-const cache = new LRU({ max: 400, ttl: 1000 * 60 * 15 });
+const cache = new LRUCache({ max: 400, ttl: 1000 * 60 * 60 * 24 });
 
 const todayKey = () => {
   const now = new Date();
