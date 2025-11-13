@@ -16,10 +16,15 @@ app.use(pinoHttp({ logger: log }));
 app.use(cors());
 app.use(express.json());
 
-const KEYS = (process.env.YOUTUBE_API_KEYS || "").split(",").map(s => s.trim()).filter(Boolean);
+const KEYS = (process.env.YOUTUBE_API_KEYS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 let keyIdx = 0;
 
-const categories = JSON.parse(fs.readFileSync(path.join(__dirname, "categories.json"), "utf8"));
+const categories = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "categories.json"), "utf8")
+);
 
 const cache = new LRUCache({ max: 400, ttl: 1000 * 60 * 60 * 24 });
 
@@ -38,22 +43,115 @@ async function yt(url) {
     const sep = url.includes("?") ? "&" : "?";
     const r = await fetch(`${url}${sep}key=${key}`);
     if (r.ok) return r.json();
-    if (r.status === 403 || r.status === 429) { keyIdx++; tries++; continue; }
+    if (r.status === 403 || r.status === 429) {
+      keyIdx++;
+      tries++;
+      continue;
+    }
     throw new Error(`YouTube ${r.status}`);
   }
   throw new Error("All API keys exhausted");
 }
 
 async function search(q, maxResults = 25, pageToken = "") {
-  const base = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoEmbeddable=true&safeSearch=strict&maxResults=${maxResults}&q=${encodeURIComponent(q)}${pageToken ? `&pageToken=${pageToken}` : ""}`;
+  const base = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoEmbeddable=true&safeSearch=strict&maxResults=${maxResults}&q=${encodeURIComponent(
+    q
+  )}${pageToken ? `&pageToken=${pageToken}` : ""}`;
   return yt(base);
 }
 
 async function videosByIds(ids) {
   if (!ids.length) return { items: [] };
-  const base = `https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics&id=${ids.join(",")}`;
+  const base = `https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics&id=${ids.join(
+    ","
+  )}`;
   return yt(base);
 }
+
+// ------------------ KID-SAFE FILTER LOGIC ------------------
+
+// Words that INSTANTLY block a video if they show up in the title
+const BLOCK_TITLE_KEYWORDS = [
+  "trailer",
+  "fan trailer",
+  "teaser",
+  "reaction",
+  "review",
+  "analysis",
+  "explained",
+  "commentary",
+  "facts",
+  "weird facts",
+  "made me",
+  "uncomfortable",
+  "creepy",
+  "theory",
+  "conspiracy",
+  "breakdown",
+  "behind the scenes",
+  "live action",
+  "short film",
+];
+
+// Title MUST contain at least ONE of these to look like a real cartoon/episode
+const REQUIRE_TITLE_KEYWORDS = [
+  "cartoon",
+  "episode",
+  "full episode",
+  "animated",
+  "animation",
+  "series",
+  "season",
+];
+
+// Optional: allow-only channels that look like kids/cartoon brands
+const ALLOWED_CHANNEL_PATTERNS = [
+  "kids",
+  "kid's",
+  "cartoon",
+  "toons",
+  "toon",
+  "retro",
+  "classic",
+  "official",
+  "network",
+  "nickelodeon",
+  "nick jr",
+  "cartoon network",
+  "disney xd",
+  "disney",
+  "boomerang",
+  "hasbro",
+];
+
+function filterKidSafeItems(items) {
+  return items.filter((v) => {
+    const title = (v.title || "").toLowerCase();
+    const channel = (v.channel || "").toLowerCase();
+
+    // 1) Block obvious junk / negative / meta content
+    if (BLOCK_TITLE_KEYWORDS.some((kw) => title.includes(kw))) {
+      return false;
+    }
+
+    // 2) Require “cartoon/episode/animated/…” to even be considered
+    if (!REQUIRE_TITLE_KEYWORDS.some((kw) => title.includes(kw))) {
+      return false;
+    }
+
+    // 3) Optional: only allow channels that look like kid/cartoon brands
+    const passesChannel = ALLOWED_CHANNEL_PATTERNS.some((pattern) =>
+      channel.includes(pattern)
+    );
+
+    // If you want this STRONG, uncomment this:
+    // if (!passesChannel) return false;
+
+    return true;
+  });
+}
+
+// ------------------ ROUTES ------------------
 
 // GET /videos?age=1-2&limit=50  daily cache
 app.get("/videos", async (req, res) => {
@@ -71,7 +169,9 @@ app.get("/videos", async (req, res) => {
     while (picked.length < limit && termIdx < terms.length + 6) {
       const q = terms[termIdx % terms.length];
       const r = await search(q, 25, token);
-      const ids = (r.items || []).map(i => i.id.videoId).filter(Boolean);
+      const ids = (r.items || [])
+        .map((i) => i.id.videoId)
+        .filter(Boolean);
       for (const id of ids) {
         if (!picked.includes(id)) picked.push(id);
         if (picked.length === limit) break;
@@ -81,12 +181,17 @@ app.get("/videos", async (req, res) => {
     }
 
     const meta = await videosByIds(picked);
-    const items = (meta.items || []).map(v => ({
+    const itemsRaw = (meta.items || []).map((v) => ({
       id: v.id,
       title: v.snippet.title,
       channel: v.snippet.channelTitle,
-      thumb: v.snippet.thumbnails?.medium?.url || v.snippet.thumbnails?.default?.url || ""
+      thumb:
+        v.snippet.thumbnails?.medium?.url ||
+        v.snippet.thumbnails?.default?.url ||
+        "",
     }));
+
+    const items = filterKidSafeItems(itemsRaw);
     const payload = { age, count: items.length, items };
     cache.set(ckey, payload);
     res.json(payload);
@@ -105,14 +210,20 @@ app.get("/search", async (req, res) => {
     const ckey = `s:${q}:${limit}`;
     if (cache.has(ckey)) return res.json(cache.get(ckey));
     const r = await search(q, limit);
-    const ids = (r.items || []).map(i => i.id.videoId).filter(Boolean);
+    const ids = (r.items || []).map((i) => i.id.videoId).filter(Boolean);
     const meta = await videosByIds(ids);
-    const items = (meta.items || []).map(v => ({
+
+    const itemsRaw = (meta.items || []).map((v) => ({
       id: v.id,
       title: v.snippet.title,
       channel: v.snippet.channelTitle,
-      thumb: v.snippet.thumbnails?.medium?.url || v.snippet.thumbnails?.default?.url || ""
+      thumb:
+        v.snippet.thumbnails?.medium?.url ||
+        v.snippet.thumbnails?.default?.url ||
+        "",
     }));
+
+    const items = filterKidSafeItems(itemsRaw);
     const payload = { q, count: items.length, items };
     cache.set(ckey, payload);
     res.json(payload);
@@ -123,5 +234,6 @@ app.get("/search", async (req, res) => {
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => log.info({ msg: "server up", port: PORT }));
